@@ -4,7 +4,7 @@
 Этот модуль предоставляет:
 - generate_text() — генерация текста
 - generate_image() — генерация изображений (gpt-image-1 / DALL-E)
-- generate_video() — генерация видео (Sora)
+- generate_video() — генерация видео (Sora 2)
 - calculate_text_cost() — расчёт стоимости текста
 
 Все функции возвращают кортеж (result, meta), где meta содержит
@@ -176,13 +176,15 @@ class OpenAIClient:
         max_wait: int | None = None,
     ) -> tuple[bytes, dict]:
         """
-        Генерирует видео через OpenAI Sora API.
+        Генерирует видео через OpenAI Sora 2 API.
+        
+        Документация: https://platform.openai.com/docs/guides/video-generation
         
         Args:
             prompt: Описание видео
-            model: Модель (по умолчанию sora)
-            seconds: Длительность в секундах
-            size: Размер (например "1080x1920")
+            model: Модель (sora-2 или sora-2-pro)
+            seconds: Длительность в секундах (5-20)
+            size: Размер ("1280x720" landscape или "720x1280" portrait)
             poll_interval: Интервал polling в секундах
             max_wait: Максимальное время ожидания в секундах
         
@@ -205,76 +207,47 @@ class OpenAIClient:
         used_poll_interval = poll_interval or config.video_poll_interval_seconds
         used_max_wait = max_wait or config.video_max_wait_seconds
         
-        # Используем прямой HTTP запрос к Sora API
-        # POST https://api.openai.com/v1/videos/generations
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
+        # Создаём задачу на генерацию через SDK
+        # POST /v1/videos
+        # ВАЖНО: seconds должен быть строкой "4", "8" или "12"
+        video_job = await self._client.videos.create(
+            model=used_model,
+            prompt=prompt,
+            size=used_size,
+            seconds=str(used_seconds),
+        )
         
-        create_payload = {
-            "model": used_model,
-            "prompt": prompt,
-        }
+        video_id = video_job.id
+        start_time = time.time()
         
-        async with httpx.AsyncClient(timeout=60.0) as http_client:
-            # Создаём задачу на генерацию
-            create_response = await http_client.post(
-                "https://api.openai.com/v1/videos/generations",
-                headers=headers,
-                json=create_payload,
-            )
-            create_response.raise_for_status()
-            job_data = create_response.json()
-            
-            video_id = job_data.get("id")
-            if not video_id:
-                raise Exception(f"Не получен ID видео: {job_data}")
-            
-            start_time = time.time()
-            
-            # Polling до завершения
-            while True:
-                elapsed = time.time() - start_time
-                if elapsed > used_max_wait:
-                    raise TimeoutError(
-                        f"Генерация видео превысила лимит ожидания ({used_max_wait} сек)"
-                    )
-                
-                # Проверяем статус
-                status_response = await http_client.get(
-                    f"https://api.openai.com/v1/videos/generations/{video_id}",
-                    headers=headers,
+        # Polling до завершения
+        while True:
+            elapsed = time.time() - start_time
+            if elapsed > used_max_wait:
+                raise TimeoutError(
+                    f"Генерация видео превысила лимит ожидания ({used_max_wait} сек)"
                 )
-                status_response.raise_for_status()
-                status_data = status_response.json()
-                
-                status = status_data.get("status", "")
-                
-                if status == "completed":
-                    break
-                elif status == "failed":
-                    error_msg = status_data.get("error", "Unknown error")
-                    raise Exception(f"Генерация видео провалилась: {error_msg}")
-                
-                # Ждём перед следующей проверкой
-                await asyncio.sleep(used_poll_interval)
             
-            # Скачиваем видео
-            # Получаем URL из ответа или формируем endpoint
-            video_url = status_data.get("url")
-            if video_url:
-                video_response = await http_client.get(video_url)
-            else:
-                # Альтернативный endpoint
-                video_response = await http_client.get(
-                    f"https://api.openai.com/v1/videos/generations/{video_id}/content",
-                    headers=headers,
-                )
-            video_response.raise_for_status()
-            video_bytes = video_response.content
+            # Проверяем статус
+            # GET /v1/videos/{video_id}
+            status = await self._client.videos.retrieve(video_id)
+            
+            if status.status == "completed":
+                break
+            elif status.status == "failed":
+                error_msg = "Unknown error"
+                if hasattr(status, "error") and status.error:
+                    error_msg = getattr(status.error, "message", str(status.error))
+                raise Exception(f"Генерация видео провалилась: {error_msg}")
+            
+            # Ждём перед следующей проверкой
+            await asyncio.sleep(used_poll_interval)
         
-        # Стоимость
+        # Скачиваем видео
+        # GET /v1/videos/{video_id}/content
+        video_bytes = await self._download_video_content(video_id)
+        
+        # Стоимость: $0.10 за секунду для sora-2, $0.30 для sora-2-pro
         cost_usd = used_seconds * config.video_cost_usd_per_second
         
         meta = {
@@ -287,6 +260,37 @@ class OpenAIClient:
         }
         
         return video_bytes, meta
+    
+    async def _download_video_content(self, video_id: str) -> bytes:
+        """
+        Скачивает видео контент по ID.
+        GET /v1/videos/{video_id}/content
+        """
+        # Пробуем через SDK если есть метод
+        try:
+            content = await self._client.videos.download_content(video_id)
+            # Если SDK возвращает объект с методом read или bytes
+            if hasattr(content, "read"):
+                return await content.read()
+            elif hasattr(content, "content"):
+                return content.content
+            elif isinstance(content, bytes):
+                return content
+            else:
+                # Пробуем получить arrayBuffer
+                body = await content.arrayBuffer() if hasattr(content, "arrayBuffer") else content
+                return bytes(body) if not isinstance(body, bytes) else body
+        except AttributeError:
+            pass
+        
+        # Fallback: прямой HTTP запрос
+        url = f"https://api.openai.com/v1/videos/{video_id}/content"
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+        
+        async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
+            response = await client.get(url, headers=headers)
+            response.raise_for_status()
+            return response.content
 
 
 # === Глобальный экземпляр клиента ===

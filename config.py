@@ -71,13 +71,16 @@ class Config:
     image_cost_usd_1536x1024: float = 0.016
     image_cost_usd_default: float = 0.011
     
-    # === Video generation ===
-    video_model: str = "sora"
-    video_seconds: int = 5
-    video_size: str = "1080x1920"
-    video_cost_usd_per_second: float = 0.20
-    video_poll_interval_seconds: int = 3
-    video_max_wait_seconds: int = 180
+    # === Video generation (Sora 2) ===
+    # Модели: sora-2 (быстрее, $0.10/сек) или sora-2-pro (качественнее, $0.30/сек)
+    # Размеры: 1280x720 (landscape) или 720x1280 (portrait)
+    # Длительность: ТОЛЬКО 4, 8 или 12 секунд
+    video_model: str = "sora-2"
+    video_seconds: int = 4  # Допустимые значения: 4, 8, 12
+    video_size: str = "1280x720"  # landscape
+    video_cost_usd_per_second: float = 0.10  # $0.10 для sora-2, $0.30 для sora-2-pro
+    video_poll_interval_seconds: int = 10  # Рекомендуется 10-20 сек
+    video_max_wait_seconds: int = 300  # Видео может генерироваться несколько минут
     
     # === Debug ===
     debug_keep_media: bool = False
@@ -141,13 +144,13 @@ def load_config() -> Config:
         image_cost_usd_1536x1024=_get_float("IMAGE_COST_USD_1536x1024", 0.016),
         image_cost_usd_default=_get_float("IMAGE_COST_USD_DEFAULT", 0.011),
         
-        # Video
-        video_model=os.getenv("VIDEO_MODEL", "sora"),
-        video_seconds=_get_int("VIDEO_SECONDS", 5),
-        video_size=os.getenv("VIDEO_SIZE", "1080x1920"),
-        video_cost_usd_per_second=_get_float("VIDEO_COST_USD_PER_SECOND", 0.20),
-        video_poll_interval_seconds=_get_int("VIDEO_POLL_INTERVAL_SECONDS", 3),
-        video_max_wait_seconds=_get_int("VIDEO_MAX_WAIT_SECONDS", 180),
+        # Video (Sora 2)
+        video_model=os.getenv("VIDEO_MODEL", "sora-2"),
+        video_seconds=_get_int("VIDEO_SECONDS", 4),  # Только 4, 8 или 12
+        video_size=os.getenv("VIDEO_SIZE", "1280x720"),
+        video_cost_usd_per_second=_get_float("VIDEO_COST_USD_PER_SECOND", 0.10),
+        video_poll_interval_seconds=_get_int("VIDEO_POLL_INTERVAL_SECONDS", 10),
+        video_max_wait_seconds=_get_int("VIDEO_MAX_WAIT_SECONDS", 300),
         
         # Debug
         debug_keep_media=_get_bool("DEBUG_KEEP_MEDIA", False),

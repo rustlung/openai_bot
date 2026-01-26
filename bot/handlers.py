@@ -3,23 +3,29 @@
 
 Команды:
 - /start — приветствие и справка
+- /help — полный список команд
 - /mode — выбор режима (system prompt)
 - /reset — очистка истории диалога
+- /cost — показать статистику расходов
+- /reset_cost — сбросить статистику расходов
+- /image <prompt> — генерация изображения
+- /video <prompt> — генерация видео
 - Текстовые сообщения — обработка через OpenAI
 """
 
 import json
+import os
 import sys
 from pathlib import Path
 
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
-from aiogram.filters import Command
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.filters import Command, CommandObject
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
 
 from config import config
 from storage import MemoryStore
-from services import generate_text
+from services import generate_text, generate_image, generate_video, get_usd_to_rub
 
 # Роутер для регистрации хендлеров
 router = Router()
@@ -111,9 +117,13 @@ def get_system_prompt(mode_key: str) -> str:
     """Возвращает system prompt для режима."""
     if mode_key in prompts:
         return prompts[mode_key].get("system_prompt", "")
-    # Fallback на первый доступный режим
     first_key = next(iter(prompts))
     return prompts[first_key].get("system_prompt", "")
+
+
+def format_cost_line(cost_usd: float, cost_rub: float) -> str:
+    """Форматирует строку стоимости."""
+    return f"~{cost_usd:.6f} USD (~{cost_rub:.2f} ₽)"
 
 
 # === Команда /start ===
@@ -129,9 +139,36 @@ async def cmd_start(message: Message) -> None:
         "👋 <b>Привет! Я AI-ассистент.</b>\n\n"
         f"🎭 Текущий режим: <b>{mode_name}</b>\n\n"
         "📝 <b>Команды:</b>\n"
+        "/help — полный список команд\n"
         "/mode — выбрать режим общения\n"
-        "/reset — очистить историю диалога\n\n"
+        "/reset — очистить историю диалога\n"
+        "/cost — посмотреть расходы\n"
+        "/image &lt;описание&gt; — сгенерировать картинку\n\n"
         "Просто напишите сообщение, и я отвечу!"
+    )
+    
+    await message.answer(text, parse_mode="HTML")
+
+
+# === Команда /help ===
+
+@router.message(Command("help"))
+async def cmd_help(message: Message) -> None:
+    """Обработчик команды /help — полный список команд."""
+    text = (
+        "📖 <b>Список команд:</b>\n\n"
+        "<b>Основные:</b>\n"
+        "/start — приветствие\n"
+        "/help — эта справка\n"
+        "/mode — выбрать режим (стиль ответов)\n"
+        "/reset — очистить историю диалога\n\n"
+        "<b>Генерация:</b>\n"
+        "/image &lt;описание&gt; — сгенерировать картинку\n"
+        "<s>/video</s> — <i>временно недоступно</i>\n\n"
+        "<b>Статистика:</b>\n"
+        "/cost — посмотреть расходы по чату\n"
+        "/reset_cost — сбросить счётчик расходов\n\n"
+        "<b>Текстовые сообщения</b> — я отвечу с учётом контекста диалога."
     )
     
     await message.answer(text, parse_mode="HTML")
@@ -149,7 +186,6 @@ async def cmd_mode(message: Message) -> None:
     buttons = []
     for key, data in prompts.items():
         name = data.get("name", key)
-        description = data.get("description", "")
         
         # Отмечаем текущий режим
         if key == current_mode:
@@ -212,9 +248,264 @@ async def cmd_reset(message: Message) -> None:
     await message.answer(
         "🗑 <b>История диалога очищена.</b>\n\n"
         f"Режим сохранён: <b>{mode_name}</b>\n"
+        "Статистика расходов сохранена (см. /cost).\n"
         "Начните новый разговор!",
         parse_mode="HTML"
     )
+
+
+# === Команда /cost ===
+
+@router.message(Command("cost"))
+async def cmd_cost(message: Message) -> None:
+    """Обработчик команды /cost — показывает статистику расходов."""
+    chat_id = message.chat.id
+    billing = memory.get_billing(chat_id)
+    
+    # Получаем актуальный курс
+    rate, rate_meta = await get_usd_to_rub()
+    rate_status = "📦 кеш" if rate_meta.get("cached") else "🔄 обновлён"
+    rate_source = rate_meta.get("source", "unknown")
+    
+    # Извлекаем данные
+    total_usd = billing.get("total_cost_usd", 0.0)
+    total_rub = billing.get("total_cost_rub", 0.0)
+    total_requests = billing.get("total_requests", 0)
+    input_tokens = billing.get("total_input_tokens", 0)
+    output_tokens = billing.get("total_output_tokens", 0)
+    
+    breakdown = billing.get("breakdown", {})
+    text_stats = breakdown.get("text", {})
+    image_stats = breakdown.get("image", {})
+    video_stats = breakdown.get("video", {})
+    
+    # Формируем текст
+    text = (
+        "💰 <b>Статистика расходов</b>\n\n"
+        f"<b>Всего потрачено:</b>\n"
+        f"  💵 {total_usd:.6f} USD\n"
+        f"  💴 {total_rub:.2f} ₽\n\n"
+        f"<b>Запросов:</b> {total_requests}\n\n"
+        f"<b>Детализация:</b>\n"
+    )
+    
+    # Текст
+    text_count = text_stats.get("count", 0)
+    if text_count > 0:
+        text_cost = text_stats.get("cost_usd", 0.0)
+        text_tokens = text_stats.get("tokens", 0)
+        text += (
+            f"  📝 Текст: {text_count} запросов\n"
+            f"     • Токены: {input_tokens:,} вход / {output_tokens:,} выход\n"
+            f"     • Стоимость: {text_cost:.6f} USD\n"
+        )
+    
+    # Изображения
+    img_count = image_stats.get("count", 0)
+    if img_count > 0:
+        img_cost = image_stats.get("cost_usd", 0.0)
+        text += (
+            f"  🖼 Изображения: {img_count} шт.\n"
+            f"     • Стоимость: {img_cost:.6f} USD\n"
+        )
+    
+    # Видео
+    vid_count = video_stats.get("count", 0)
+    if vid_count > 0:
+        vid_cost = video_stats.get("cost_usd", 0.0)
+        vid_seconds = video_stats.get("seconds", 0)
+        text += (
+            f"  🎬 Видео: {vid_count} шт. ({vid_seconds} сек)\n"
+            f"     • Стоимость: {vid_cost:.6f} USD\n"
+        )
+    
+    if total_requests == 0:
+        text += "  Пока нет запросов.\n"
+    
+    text += (
+        f"\n<b>Курс USD/RUB:</b> {rate:.2f} ({rate_status}, {rate_source})\n\n"
+        f"<i>Сбросить статистику: /reset_cost</i>"
+    )
+    
+    await message.answer(text, parse_mode="HTML")
+
+
+# === Команда /reset_cost ===
+
+@router.message(Command("reset_cost"))
+async def cmd_reset_cost(message: Message) -> None:
+    """Обработчик команды /reset_cost — сбрасывает статистику расходов."""
+    chat_id = message.chat.id
+    memory.clear_billing(chat_id)
+    
+    await message.answer(
+        "🗑 <b>Статистика расходов сброшена.</b>\n\n"
+        "Счётчик начинается с нуля.",
+        parse_mode="HTML"
+    )
+
+
+# === Команда /image ===
+
+@router.message(Command("image"))
+async def cmd_image(message: Message, command: CommandObject) -> None:
+    """Обработчик команды /image — генерация изображения."""
+    chat_id = message.chat.id
+    prompt = command.args
+    
+    if not prompt or not prompt.strip():
+        await message.answer(
+            "🖼 <b>Генерация изображения</b>\n\n"
+            "Использование: /image &lt;описание&gt;\n\n"
+            "Пример: /image космический кот в скафандре",
+            parse_mode="HTML"
+        )
+        return
+    
+    prompt = prompt.strip()
+    
+    # Отправляем индикатор
+    await message.bot.send_chat_action(chat_id, "upload_photo")
+    status_msg = await message.answer("🎨 Генерирую изображение...")
+    
+    try:
+        # Генерируем изображение
+        image_bytes, meta = await generate_image(prompt)
+        
+        # Получаем курс и обновляем billing
+        rate, _ = await get_usd_to_rub()
+        memory.update_billing(chat_id, meta, rate)
+        
+        # Формируем caption
+        cost_usd = meta.get("cost_usd", 0.0)
+        cost_rub = cost_usd * rate
+        
+        caption = f"🖼 <b>Готово!</b>\n<i>{prompt[:200]}</i>"
+        
+        if config.show_cost_each_reply:
+            caption += f"\n\n💰 Стоимость: {format_cost_line(cost_usd, cost_rub)}"
+        
+        # Удаляем статус
+        await status_msg.delete()
+        
+        # Отправляем изображение
+        photo = BufferedInputFile(image_bytes, filename="image.png")
+        await message.answer_photo(photo, caption=caption, parse_mode="HTML")
+        
+    except Exception as e:
+        print(f"Ошибка генерации изображения для chat_id={chat_id}: {e}")
+        
+        await status_msg.edit_text(
+            "⚠️ <b>Ошибка генерации изображения</b>\n\n"
+            "Попробуйте изменить описание или повторить позже.",
+            parse_mode="HTML"
+        )
+
+
+# === Команда /video ===
+# ВРЕМЕННО ОТКЛЮЧЕНО: API Sora недоступен для широкого использования
+# Код генерации сохранён в services/openai_client.py для будущего использования
+
+# Флаг для включения/выключения функционала видео
+VIDEO_ENABLED = False
+
+
+@router.message(Command("video"))
+async def cmd_video(message: Message, command: CommandObject) -> None:
+    """Обработчик команды /video — генерация видео (временно отключено)."""
+    
+    # Проверяем, включена ли функция
+    if not VIDEO_ENABLED:
+        await message.answer(
+            "🎬 <b>Генерация видео временно недоступна</b>\n\n"
+            "API для генерации видео (Sora) пока находится в закрытой бета-версии "
+            "и недоступен для широкого использования.\n\n"
+            "Функция будет включена, когда API станет доступен.\n\n"
+            "<i>Пока можете использовать /image для генерации изображений.</i>",
+            parse_mode="HTML"
+        )
+        return
+    
+    # === Код ниже будет работать когда VIDEO_ENABLED = True ===
+    
+    chat_id = message.chat.id
+    prompt = command.args
+    
+    if not prompt or not prompt.strip():
+        await message.answer(
+            "🎬 <b>Генерация видео</b>\n\n"
+            f"Использование: /video &lt;описание&gt;\n\n"
+            f"Параметры: {config.video_seconds} сек, {config.video_size}\n\n"
+            "Пример: /video плавный полёт над горами на рассвете",
+            parse_mode="HTML"
+        )
+        return
+    
+    prompt = prompt.strip()
+    
+    # Отправляем статус
+    status_msg = await message.answer(
+        f"🎬 <b>Генерирую видео...</b>\n\n"
+        f"Это может занять до {config.video_max_wait_seconds // 60} мин.\n"
+        f"Параметры: {config.video_seconds} сек, модель {config.video_model}",
+        parse_mode="HTML"
+    )
+    
+    await message.bot.send_chat_action(chat_id, "upload_video")
+    
+    try:
+        # Генерируем видео
+        video_bytes, meta = await generate_video(prompt)
+        
+        # Получаем курс и обновляем billing
+        rate, _ = await get_usd_to_rub()
+        memory.update_billing(chat_id, meta, rate)
+        
+        # Формируем caption
+        cost_usd = meta.get("cost_usd", 0.0)
+        cost_rub = cost_usd * rate
+        seconds = meta.get("seconds", config.video_seconds)
+        
+        caption = f"🎬 <b>Готово!</b> ({seconds} сек)\n<i>{prompt[:200]}</i>"
+        
+        if config.show_cost_each_reply:
+            caption += f"\n\n💰 Стоимость: {format_cost_line(cost_usd, cost_rub)}"
+        
+        # Сохраняем временно если нужно, иначе отправляем напрямую
+        video_id = meta.get("video_id", "video")
+        
+        if config.debug_keep_media:
+            # Сохраняем в data/tmp/
+            tmp_dir = Path("data/tmp")
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            tmp_path = tmp_dir / f"{video_id}.mp4"
+            tmp_path.write_bytes(video_bytes)
+            print(f"Видео сохранено: {tmp_path}")
+        
+        # Удаляем статус
+        await status_msg.delete()
+        
+        # Отправляем видео
+        video_file = BufferedInputFile(video_bytes, filename=f"{video_id}.mp4")
+        await message.answer_video(video_file, caption=caption, parse_mode="HTML")
+        
+    except TimeoutError as e:
+        await status_msg.edit_text(
+            "⏱ <b>Превышено время ожидания</b>\n\n"
+            f"Генерация видео заняла слишком много времени.\n"
+            "Попробуйте упростить описание или повторить позже.",
+            parse_mode="HTML"
+        )
+        
+    except Exception as e:
+        print(f"Ошибка генерации видео для chat_id={chat_id}: {e}")
+        
+        await status_msg.edit_text(
+            "⚠️ <b>Ошибка генерации видео</b>\n\n"
+            "Попробуйте изменить описание или повторить позже.\n"
+            f"<code>{str(e)[:100]}</code>",
+            parse_mode="HTML"
+        )
 
 
 # === Обработка текстовых сообщений ===
@@ -253,11 +544,20 @@ async def handle_text_message(message: Message) -> None:
         # Сохраняем обмен в память
         memory.add_exchange(chat_id, user_text, assistant_text)
         
-        # Обновляем статистику (для будущего billing)
-        memory.update_stats(chat_id, meta)
+        # Получаем курс и обновляем billing
+        rate, _ = await get_usd_to_rub()
+        memory.update_billing(chat_id, meta, rate)
         
-        # Отправляем ответ
-        await message.answer(assistant_text)
+        # Формируем ответ
+        response_text = assistant_text
+        
+        if config.show_cost_each_reply:
+            cost_usd = meta.get("cost_usd", 0.0)
+            cost_rub = cost_usd * rate
+            response_text += f"\n\n<i>💰 {format_cost_line(cost_usd, cost_rub)}</i>"
+            await message.answer(response_text, parse_mode="HTML")
+        else:
+            await message.answer(response_text)
         
     except Exception as e:
         # Логируем ошибку

@@ -2,19 +2,26 @@
 Клиент для работы с OpenAI API.
 
 Этот модуль предоставляет:
-- generate_text() — генерация текста (реализовано)
-- generate_image() — генерация изображений (TODO)
-- generate_video() — генерация видео (TODO)
-- estimate_cost() — расчёт стоимости (TODO)
+- generate_text() — генерация текста
+- generate_image() — генерация изображений (gpt-image-1 / DALL-E)
+- generate_video() — генерация видео (Sora)
+- calculate_text_cost() — расчёт стоимости текста
 
 Все функции возвращают кортеж (result, meta), где meta содержит
-информацию для billing (токены, модель и т.д.)
+информацию для billing (токены, модель, cost_usd и т.д.)
 """
 
+import asyncio
+import base64
+import time
+from pathlib import Path
 from typing import Any
+
+import httpx
 from openai import AsyncOpenAI
 
-from config import config
+from config import config, get_image_cost_usd
+from utils.file_utils import ensure_dir
 
 
 class OpenAIClient:
@@ -42,23 +49,12 @@ class OpenAIClient:
         """
         Генерирует текстовый ответ от модели.
         
-        Args:
-            messages: Список сообщений в формате OpenAI
-                      [{"role": "system|user|assistant", "content": "..."}]
-            model: Модель для использования (опционально)
-            **kwargs: Дополнительные параметры для API (temperature, max_tokens и т.д.)
-        
         Returns:
-            Кортеж (assistant_text, meta), где:
-            - assistant_text: Текст ответа
-            - meta: Словарь с метаданными для billing:
-                - model: использованная модель
-                - prompt_tokens: токены запроса
-                - completion_tokens: токены ответа
-                - total_tokens: всего токенов
-        
-        Raises:
-            Exception: При ошибке API (обрабатывается вызывающим кодом)
+            Кортеж (assistant_text, meta), где meta содержит:
+            - type: "text"
+            - model: использованная модель
+            - usage: {input_tokens, output_tokens, total_tokens}
+            - cost_usd: стоимость в USD
         """
         used_model = model or self.default_model
         
@@ -71,16 +67,226 @@ class OpenAIClient:
         # Извлекаем текст ответа
         assistant_text = response.choices[0].message.content or ""
         
-        # Собираем метаданные для billing
+        # Собираем usage
         usage = response.usage
+        input_tokens = usage.prompt_tokens if usage else 0
+        output_tokens = usage.completion_tokens if usage else 0
+        total_tokens = usage.total_tokens if usage else 0
+        
+        # Рассчитываем стоимость
+        cost_usd = calculate_text_cost(input_tokens, output_tokens)
+        
         meta = {
+            "type": "text",
             "model": used_model,
-            "prompt_tokens": usage.prompt_tokens if usage else 0,
-            "completion_tokens": usage.completion_tokens if usage else 0,
-            "total_tokens": usage.total_tokens if usage else 0,
+            "usage": {
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "total_tokens": total_tokens,
+            },
+            "cost_usd": cost_usd,
         }
         
         return assistant_text, meta
+    
+    async def generate_image(
+        self,
+        prompt: str,
+        model: str | None = None,
+        size: str | None = None,
+        **kwargs: Any
+    ) -> tuple[bytes, dict]:
+        """
+        Генерирует изображение.
+        
+        Args:
+            prompt: Описание изображения
+            model: Модель (по умолчанию из config.image_model)
+            size: Размер (по умолчанию из config.image_size)
+        
+        Returns:
+            Кортеж (image_bytes, meta), где meta содержит:
+            - type: "image"
+            - model: использованная модель
+            - size: размер
+            - n: количество изображений
+            - cost_usd: стоимость в USD
+        
+        Raises:
+            Exception: При ошибке генерации
+        """
+        used_model = model or config.image_model
+        used_size = size or config.image_size
+        
+        # gpt-image-1 возвращает base64 по умолчанию и не поддерживает response_format
+        # DALL-E 3 поддерживает response_format
+        if used_model.startswith("gpt-image"):
+            # Для gpt-image-1: не передаём response_format
+            response = await self._client.images.generate(
+                model=used_model,
+                prompt=prompt,
+                size=used_size,
+                n=1,
+                **kwargs
+            )
+            # gpt-image-1 возвращает base64 в поле b64_json
+            b64_data = response.data[0].b64_json
+            if b64_data:
+                image_bytes = base64.b64decode(b64_data)
+            else:
+                # Если вернулся URL — скачиваем
+                image_url = response.data[0].url
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    img_response = await client.get(image_url)
+                    img_response.raise_for_status()
+                    image_bytes = img_response.content
+        else:
+            # Для DALL-E 2/3: можно использовать response_format
+            response = await self._client.images.generate(
+                model=used_model,
+                prompt=prompt,
+                size=used_size,
+                n=1,
+                response_format="b64_json",
+                **kwargs
+            )
+            b64_data = response.data[0].b64_json
+            image_bytes = base64.b64decode(b64_data)
+        
+        # Стоимость по размеру
+        cost_usd = get_image_cost_usd(used_size)
+        
+        meta = {
+            "type": "image",
+            "model": used_model,
+            "size": used_size,
+            "n": 1,
+            "cost_usd": cost_usd,
+        }
+        
+        return image_bytes, meta
+    
+    async def generate_video(
+        self,
+        prompt: str,
+        model: str | None = None,
+        seconds: int | None = None,
+        size: str | None = None,
+        poll_interval: int | None = None,
+        max_wait: int | None = None,
+    ) -> tuple[bytes, dict]:
+        """
+        Генерирует видео через OpenAI Sora API.
+        
+        Args:
+            prompt: Описание видео
+            model: Модель (по умолчанию sora)
+            seconds: Длительность в секундах
+            size: Размер (например "1080x1920")
+            poll_interval: Интервал polling в секундах
+            max_wait: Максимальное время ожидания в секундах
+        
+        Returns:
+            Кортеж (video_bytes, meta), где meta содержит:
+            - type: "video"
+            - model: использованная модель
+            - seconds: длительность
+            - size: размер
+            - cost_usd: стоимость
+            - video_id: ID сгенерированного видео
+        
+        Raises:
+            TimeoutError: Превышено время ожидания
+            Exception: Ошибка генерации
+        """
+        used_model = model or config.video_model
+        used_seconds = seconds or config.video_seconds
+        used_size = size or config.video_size
+        used_poll_interval = poll_interval or config.video_poll_interval_seconds
+        used_max_wait = max_wait or config.video_max_wait_seconds
+        
+        # Используем прямой HTTP запрос к Sora API
+        # POST https://api.openai.com/v1/videos/generations
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        
+        create_payload = {
+            "model": used_model,
+            "prompt": prompt,
+        }
+        
+        async with httpx.AsyncClient(timeout=60.0) as http_client:
+            # Создаём задачу на генерацию
+            create_response = await http_client.post(
+                "https://api.openai.com/v1/videos/generations",
+                headers=headers,
+                json=create_payload,
+            )
+            create_response.raise_for_status()
+            job_data = create_response.json()
+            
+            video_id = job_data.get("id")
+            if not video_id:
+                raise Exception(f"Не получен ID видео: {job_data}")
+            
+            start_time = time.time()
+            
+            # Polling до завершения
+            while True:
+                elapsed = time.time() - start_time
+                if elapsed > used_max_wait:
+                    raise TimeoutError(
+                        f"Генерация видео превысила лимит ожидания ({used_max_wait} сек)"
+                    )
+                
+                # Проверяем статус
+                status_response = await http_client.get(
+                    f"https://api.openai.com/v1/videos/generations/{video_id}",
+                    headers=headers,
+                )
+                status_response.raise_for_status()
+                status_data = status_response.json()
+                
+                status = status_data.get("status", "")
+                
+                if status == "completed":
+                    break
+                elif status == "failed":
+                    error_msg = status_data.get("error", "Unknown error")
+                    raise Exception(f"Генерация видео провалилась: {error_msg}")
+                
+                # Ждём перед следующей проверкой
+                await asyncio.sleep(used_poll_interval)
+            
+            # Скачиваем видео
+            # Получаем URL из ответа или формируем endpoint
+            video_url = status_data.get("url")
+            if video_url:
+                video_response = await http_client.get(video_url)
+            else:
+                # Альтернативный endpoint
+                video_response = await http_client.get(
+                    f"https://api.openai.com/v1/videos/generations/{video_id}/content",
+                    headers=headers,
+                )
+            video_response.raise_for_status()
+            video_bytes = video_response.content
+        
+        # Стоимость
+        cost_usd = used_seconds * config.video_cost_usd_per_second
+        
+        meta = {
+            "type": "video",
+            "model": used_model,
+            "seconds": used_seconds,
+            "size": used_size,
+            "cost_usd": cost_usd,
+            "video_id": video_id,
+        }
+        
+        return video_bytes, meta
 
 
 # === Глобальный экземпляр клиента ===
@@ -95,6 +301,24 @@ def get_client() -> OpenAIClient:
     return _client
 
 
+# === Расчёт стоимости ===
+
+def calculate_text_cost(input_tokens: int, output_tokens: int) -> float:
+    """
+    Рассчитывает стоимость текстового запроса в USD.
+    
+    Args:
+        input_tokens: Количество входных токенов
+        output_tokens: Количество выходных токенов
+    
+    Returns:
+        Стоимость в USD
+    """
+    input_cost = (input_tokens / 1_000_000) * config.price_text_input_usd_per_1m
+    output_cost = (output_tokens / 1_000_000) * config.price_text_output_usd_per_1m
+    return input_cost + output_cost
+
+
 # === Функции-обёртки для удобства ===
 
 async def generate_text(
@@ -105,140 +329,41 @@ async def generate_text(
     """
     Генерирует текстовый ответ.
     
-    Args:
-        messages: Список сообщений в формате OpenAI
-        model: Модель (опционально, по умолчанию из config)
-        **kwargs: Дополнительные параметры API
-    
     Returns:
         Кортеж (assistant_text, meta)
-    
-    Example:
-        text, meta = await generate_text([
-            {"role": "system", "content": "Ты помощник"},
-            {"role": "user", "content": "Привет!"}
-        ])
     """
     client = get_client()
     return await client.generate_text(messages, model, **kwargs)
 
 
-# ============================================================
-# TODO: Функции для будущих расширений (не реализованы)
-# ============================================================
-
 async def generate_image(
     prompt: str,
-    model: str = "dall-e-3",
-    size: str = "1024x1024",
-    quality: str = "standard",
+    model: str | None = None,
+    size: str | None = None,
     **kwargs: Any
-) -> tuple[str | None, dict]:
+) -> tuple[bytes, dict]:
     """
-    TODO: Генерация изображения через DALL-E.
-    
-    Args:
-        prompt: Описание изображения
-        model: Модель генерации (dall-e-2, dall-e-3)
-        size: Размер изображения (1024x1024, 1792x1024, 1024x1792)
-        quality: Качество (standard, hd — только для dall-e-3)
-        **kwargs: Дополнительные параметры
+    Генерирует изображение.
     
     Returns:
-        Кортеж (image_url, meta), где:
-        - image_url: URL сгенерированного изображения (или None при ошибке)
-        - meta: Метаданные для billing:
-            - model: использованная модель
-            - size: размер
-            - quality: качество
-            - cost_usd: примерная стоимость
-    
-    Example:
-        url, meta = await generate_image("Космический кот в стиле киберпанк")
-        if url:
-            # Отправить изображение пользователю
-            pass
+        Кортеж (image_bytes, meta)
     """
-    # TODO: Реализовать генерацию изображений
-    # client = get_client()
-    # response = await client._client.images.generate(
-    #     model=model,
-    #     prompt=prompt,
-    #     size=size,
-    #     quality=quality,
-    #     n=1,
-    #     **kwargs
-    # )
-    # image_url = response.data[0].url
-    # meta = {"model": model, "size": size, "quality": quality}
-    # return image_url, meta
-    
-    raise NotImplementedError("generate_image() пока не реализована. См. TODO в services/openai_client.py")
+    client = get_client()
+    return await client.generate_image(prompt, model, size, **kwargs)
 
 
 async def generate_video(
     prompt: str,
-    model: str = "sora",  # или другая модель видео в будущем
-    duration: int = 5,
+    model: str | None = None,
+    seconds: int | None = None,
+    size: str | None = None,
     **kwargs: Any
-) -> tuple[str | None, dict]:
+) -> tuple[bytes, dict]:
     """
-    TODO: Генерация видео (когда API станет доступен).
-    
-    Args:
-        prompt: Описание видео
-        model: Модель генерации
-        duration: Длительность в секундах
-        **kwargs: Дополнительные параметры
+    Генерирует видео.
     
     Returns:
-        Кортеж (video_url, meta), где:
-        - video_url: URL сгенерированного видео
-        - meta: Метаданные для billing
-    
-    Note:
-        На момент написания кода публичный API генерации видео от OpenAI
-        недоступен. Эта функция — заготовка для будущего расширения.
+        Кортеж (video_bytes, meta)
     """
-    # TODO: Реализовать когда появится API
-    raise NotImplementedError("generate_video() пока не реализована — ожидаем публичный API.")
-
-
-def estimate_cost(meta: dict, usd_rub_rate: float | None = None) -> dict:
-    """
-    TODO: Расчёт стоимости запроса на основе метаданных.
-    
-    Args:
-        meta: Метаданные от generate_* функций
-        usd_rub_rate: Курс USD/RUB (если None — берётся из config)
-    
-    Returns:
-        Словарь с расчётом стоимости:
-        - cost_usd: стоимость в долларах
-        - cost_rub: стоимость в рублях
-        - breakdown: детализация по компонентам
-    
-    Example:
-        text, meta = await generate_text(messages)
-        cost = estimate_cost(meta)
-        print(f"Стоимость запроса: ${cost['cost_usd']:.4f} ({cost['cost_rub']:.2f} ₽)")
-    
-    Note:
-        Цены на модели меняются. Актуальные цены см. на https://openai.com/pricing
-    """
-    # TODO: Реализовать расчёт стоимости
-    # Примерные цены (на январь 2024, устаревают быстро):
-    # GPT-4: $0.03/1K prompt, $0.06/1K completion
-    # GPT-4 Turbo: $0.01/1K prompt, $0.03/1K completion
-    # GPT-3.5 Turbo: $0.0015/1K prompt, $0.002/1K completion
-    # DALL-E 3: $0.04-0.12 за изображение
-    
-    rate = usd_rub_rate or config.usd_rub_rate
-    
-    # Заглушка — возвращаем нулевую стоимость
-    return {
-        "cost_usd": 0.0,
-        "cost_rub": 0.0,
-        "breakdown": {},
-        "note": "estimate_cost() пока не реализована полностью. См. TODO в services/openai_client.py"
-    }
+    client = get_client()
+    return await client.generate_video(prompt, model, seconds, size, **kwargs)

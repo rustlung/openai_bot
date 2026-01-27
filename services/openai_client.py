@@ -266,24 +266,7 @@ class OpenAIClient:
         Скачивает видео контент по ID.
         GET /v1/videos/{video_id}/content
         """
-        # Пробуем через SDK если есть метод
-        try:
-            content = await self._client.videos.download_content(video_id)
-            # Если SDK возвращает объект с методом read или bytes
-            if hasattr(content, "read"):
-                return await content.read()
-            elif hasattr(content, "content"):
-                return content.content
-            elif isinstance(content, bytes):
-                return content
-            else:
-                # Пробуем получить arrayBuffer
-                body = await content.arrayBuffer() if hasattr(content, "arrayBuffer") else content
-                return bytes(body) if not isinstance(body, bytes) else body
-        except AttributeError:
-            pass
-        
-        # Fallback: прямой HTTP запрос
+        # Используем прямой HTTP запрос — более надёжно
         url = f"https://api.openai.com/v1/videos/{video_id}/content"
         headers = {"Authorization": f"Bearer {self.api_key}"}
         

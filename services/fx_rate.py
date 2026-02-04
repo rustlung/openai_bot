@@ -1,7 +1,7 @@
 """
 Сервис получения курса валют USD -> RUB.
 
-Использует бесплатный API Frankfurter (данные ECB) без ключей.
+Использует бесплатный API без ключей (по умолчанию: open.er-api.com).
 Кеширует результат в JSON файл для снижения нагрузки на API.
 """
 
@@ -18,8 +18,9 @@ class FXRateService:
     """
     Сервис курса валют с кешированием.
     
-    Использует Frankfurter API (ECB data):
-    https://api.frankfurter.app/latest?from=USD&to=RUB
+    Поддерживаемые форматы:
+    - open.er-api.com: https://open.er-api.com/v6/latest/USD
+    - Frankfurter (ECB): https://api.frankfurter.app/latest?from=USD&to=RUB
     """
     
     def __init__(
@@ -89,19 +90,32 @@ class FXRateService:
                 response.raise_for_status()
                 data = response.json()
             
-            # Парсим ответ Frankfurter API
-            # Формат: {"amount":1,"base":"USD","date":"2024-01-25","rates":{"RUB":88.5}}
-            rate = data.get("rates", {}).get("RUB")
-            date = data.get("date", "unknown")
+            # Парсим ответ в зависимости от формата
+            # open.er-api.com: {"result":"success","time_last_update_utc":"...","rates":{"RUB":...}}
+            # Frankfurter: {"amount":1,"base":"USD","date":"2024-01-25","rates":{"RUB":88.5}}
+            rate = None
+            date = "unknown"
+            source = "unknown"
+            
+            if isinstance(data, dict) and "rates" in data:
+                rate = data.get("rates", {}).get("RUB")
+                
+                # Определяем источник
+                if "time_last_update_utc" in data or "time_last_update_unix" in data:
+                    source = "open_er_api"
+                    date = data.get("time_last_update_utc", "unknown")
+                elif "date" in data:
+                    source = "frankfurter"
+                    date = data.get("date", "unknown")
             
             if rate is None:
                 raise ValueError("RUB rate not found in response")
             
             # Сохраняем в кеш
-            self._save_cache(rate, "frankfurter", date)
+            self._save_cache(rate, source, date)
             
             return rate, {
-                "source": "frankfurter",
+                "source": source,
                 "date": date,
                 "cached": False,
             }

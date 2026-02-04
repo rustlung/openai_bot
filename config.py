@@ -54,7 +54,7 @@ class Config:
     price_text_output_usd_per_1m: float = 10.00  # GPT-4o default
     
     # === FX (курс валют) ===
-    fx_api_url: str = "https://api.frankfurter.app/latest?from=USD&to=RUB"
+    fx_api_url: str = "https://open.er-api.com/v6/latest/USD"
     fx_cache_file_path: str = "data/fx_cache.json"
     fx_cache_ttl_seconds: int = 21600  # 6 часов
     usd_rub_rate_fallback: float = 75.92  # Fallback если API недоступен
@@ -128,7 +128,7 @@ def load_config() -> Config:
         price_text_output_usd_per_1m=_get_float("PRICE_TEXT_OUTPUT_USD_PER_1M", 10.00),
         
         # FX
-        fx_api_url=os.getenv("FX_API_URL", "https://api.frankfurter.app/latest?from=USD&to=RUB"),
+        fx_api_url=os.getenv("FX_API_URL", "https://open.er-api.com/v6/latest/USD"),
         fx_cache_file_path=os.getenv("FX_CACHE_FILE_PATH", "data/fx_cache.json"),
         fx_cache_ttl_seconds=_get_int("FX_CACHE_TTL_SECONDS", 21600),
         usd_rub_rate_fallback=_get_float("USD_RUB_RATE", 75.92),

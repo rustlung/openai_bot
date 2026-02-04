@@ -21,7 +21,10 @@
 
 ![Bot Example](assets/bot_example.png)
 
+---
+
 🏗 Architecture
+
 bot/handlers.py — команды Telegram
 
 services/openai_client.py — работа с OpenAI API
@@ -32,21 +35,24 @@ services/fx_rate.py — курс валют
 
 config.py — конфигурация
 
+---
+
 ⚙️ Installation
-```markdown
+
 bash
 Копировать код
 pip install -r requirements.txt
 Создайте .env и скопируйте в него содержимое .env.example
 Обязательны к заполнению переменные:
-```markdown
 env
 Копировать код
 TELEGRAM_BOT_TOKEN=your_token
 OPENAI_API_KEY=your_key
 
+---
+
 ▶️ Usage
-```markdown
+
 bash
 Копировать код
 python main.py
@@ -58,6 +64,8 @@ python main.py
 /cost
 /reset
 
+---
+
 📦 Tech Stack
 Python 3.10+
 
@@ -67,12 +75,16 @@ OpenAI SDK
 
 python-dotenv
 
+---
+
 🛠 Practical Use Case
 AI-ассистент в Telegram
 
 Бот поддержки клиентов
 
 Демонстрация интеграции AI в мессенджер
+
+---
 
 📜 License
 MIT

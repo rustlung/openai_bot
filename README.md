@@ -19,8 +19,6 @@
 
 ## 📸 Demo
 
-Добавьте скриншот диалога в папку `assets/`:
-
 ```markdown
 ![Bot Example](assets/bot_example.png)
 

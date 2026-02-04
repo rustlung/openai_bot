@@ -23,7 +23,7 @@
 
 ---
 
-🏗 Architecture
+## 🏗 Architecture
 
 bot/handlers.py — команды Telegram
 
@@ -37,25 +37,24 @@ config.py — конфигурация
 
 ---
 
-⚙️ Installation
+## ⚙️ Installation
 
-bash
-Копировать код
+```bash
 pip install -r requirements.txt
+```
 Создайте .env и скопируйте в него содержимое .env.example
 Обязательны к заполнению переменные:
-env
-Копировать код
+```env
 TELEGRAM_BOT_TOKEN=your_token
 OPENAI_API_KEY=your_key
-
+```
 ---
 
-▶️ Usage
+## ▶️ Usage
 
-bash
-Копировать код
+```bash
 python main.py
+```
 
 Основные команды:
 /mode
@@ -66,7 +65,7 @@ python main.py
 
 ---
 
-📦 Tech Stack
+## 📦 Tech Stack
 Python 3.10+
 
 aiogram
@@ -77,7 +76,7 @@ python-dotenv
 
 ---
 
-🛠 Practical Use Case
+## 🛠 Practical Use Case
 AI-ассистент в Telegram
 
 Бот поддержки клиентов
@@ -86,5 +85,5 @@ AI-ассистент в Telegram
 
 ---
 
-📜 License
+## 📜 License
 MIT
